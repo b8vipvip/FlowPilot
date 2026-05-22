@@ -710,14 +710,12 @@
       return KIRO_REGISTER_EXISTING_ACCOUNT_STATES.includes(cleanString(pageState));
     }
 
-    function resolveKiroRegisterEmail(currentState = {}, pageState = {}, fallbackEmail = '') {
-      const runtimeState = readKiroRuntime(currentState);
+    function resolveKiroRegisterEmail(currentState = {}, _pageState = {}, fallbackEmail = '') {
       return cleanString(
         fallbackEmail
-        || pageState?.email
-        || pageState?.accountEmail
-        || runtimeState.register?.email
         || currentState?.email
+        || currentState?.registrationEmailState?.current
+        || currentState?.registrationEmailState?.previous
       ).toLowerCase();
     }
 
@@ -886,8 +884,7 @@
     }
 
     function buildKiroVerificationPollPayload(step, state = {}, mail = {}, filterAfterTimestamp = 0) {
-      const runtimeState = readKiroRuntime(state);
-      const targetEmail = cleanString(runtimeState.register?.email || state?.email).toLowerCase();
+      const targetEmail = resolveKiroRegisterEmail(state);
       const targetEmailHints = targetEmail ? [targetEmail] : [];
       const isMail2925Provider = String(mail?.provider || '').trim().toLowerCase() === '2925';
       const normalizedProvider = String(mail?.provider || '').trim().toLowerCase();
