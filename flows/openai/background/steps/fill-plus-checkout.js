@@ -225,15 +225,20 @@
           const cardModeButton = modeButtons.find((element) => /卡密充值/.test(textOf(element)));
           const freeModeButton = modeButtons.find((element) => /免费充值/.test(textOf(element)));
           const bodyText = String(document.body?.innerText || document.documentElement?.innerText || '').replace(/\r/g, '');
+          const rawTextOf = (element) => String(element?.innerText || element?.textContent || element?.value || '');
           const logNodes = Array.from(document.querySelectorAll('[class*="log"], [id*="log"], .design-log, .logs, pre, code'));
-          const logText = logNodes.map(textOf).filter(Boolean).join('\n') || bodyText;
+          const logText = logNodes.map(rawTextOf).map((text) => text.trim()).filter(Boolean).join('\n') || bodyText;
           const extractLastLogLine = (rawText = '') => {
-            const lines = String(rawText || '')
-              .split(/\n+/)
-              .map((line) => line.replace(/\s+/g, ' ').trim())
+            const normalizeLogLine = (line = '') => String(line || '').replace(/\s+/g, ' ').trim();
+            const ignoredLinePattern = /^(?:GPC Plus 充值|系统全自动出号|限量\d+份|自助购买卡密通道|实时进度|免费池|付费池|模式：|任务：|未开始|导出|充值模式|填写卡密|Access Token|开始 Plus 充值|停止当前任务|页面已就绪)$/i;
+            const timestampEntries = String(rawText || '')
+              .replace(/\r/g, '')
+              .match(/\[\d{2}:\d{2}:\d{2}\][\s\S]*?(?=\s*\[\d{2}:\d{2}:\d{2}\]|$)/g);
+            const entries = (timestampEntries && timestampEntries.length ? timestampEntries : String(rawText || '').split(/\n+/))
+              .map(normalizeLogLine)
               .filter(Boolean)
-              .filter((line) => !/^(?:GPC Plus 充值|系统全自动出号|限量\d+份|自助购买卡密通道|实时进度|免费池|付费池|模式：|任务：|未开始|导出|充值模式|填写卡密|Access Token|开始 Plus 充值|停止当前任务|页面已就绪)$/i.test(line));
-            return lines[lines.length - 1] || '';
+              .filter((line) => !ignoredLinePattern.test(line));
+            return entries[entries.length - 1] || '';
           };
           const lastLogLine = extractLastLogLine(logText) || extractLastLogLine(bodyText);
           const cardInputs = Array.from(document.querySelectorAll('input.card-key-seg, input[placeholder*="XXXXXXXX"], input[maxlength="8"]'))
@@ -266,11 +271,13 @@
 
     function getGpcLastLogSummary(pageState = {}) {
       const rawText = String(pageState.lastLogLine || pageState.logText || pageState.bodyText || '');
-      const lines = rawText
-        .split(/\n+/)
+      const timestampEntries = rawText
+        .replace(/\r/g, '')
+        .match(/\[\d{2}:\d{2}:\d{2}\][\s\S]*?(?=\s*\[\d{2}:\d{2}:\d{2}\]|$)/g);
+      const entries = (timestampEntries && timestampEntries.length ? timestampEntries : rawText.split(/\n+/))
         .map((line) => line.replace(/\s+/g, ' ').trim())
         .filter(Boolean);
-      const line = lines[lines.length - 1] || '';
+      const line = entries[entries.length - 1] || '';
       if (!line) {
         return '';
       }
