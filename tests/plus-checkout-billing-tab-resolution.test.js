@@ -1119,6 +1119,31 @@ test('GPC billing fails current round without restart when account has no trial 
   assert.equal(events.completed.length, 0);
 });
 
+test('GPC billing treats no-trial log text as terminal even when page flag is missing', async () => {
+  const { events, executor, pageHarness } = createGpcPageExecutorHarness([
+    { startButtonText: '开始 Plus 充值', logText: 'SYSTEM 页面已就绪' },
+    { startButtonText: '任务进行中', logText: '处理中' },
+    {
+      startButtonText: '开始 Plus 充值',
+      logText: '[02:30:00] ACTION 任务开始执行... [02:30:18] ERROR 该账号没有试用资格',
+      noTrial: false,
+    },
+  ]);
+
+  await assert.rejects(
+    () => executor.executePlusCheckoutBilling({
+      plusPaymentMethod: 'gpc-helper',
+      plusCheckoutSource: 'gpc-helper',
+      plusCheckoutTabId: 77,
+    }),
+    /PLUS_CHECKOUT_NON_FREE_TRIAL::.*该账户没有试用资格.*最近日志：\[02:30:18\] ERROR 该账号没有试用资格/
+  );
+
+  assert.equal(pageHarness.clicks.length, 1);
+  assert.equal(events.logs.some((entry) => /准备再次启动/.test(entry.message)), false);
+  assert.equal(events.completed.length, 0);
+});
+
 test('GPC billing times out when page never finishes', async () => {
   const { executor, pageHarness } = createGpcPageExecutorHarness([
     { startButtonText: '任务进行中', logText: '处理中' },

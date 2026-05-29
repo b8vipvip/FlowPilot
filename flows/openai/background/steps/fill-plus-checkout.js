@@ -289,6 +289,18 @@
       return summary ? ` 最近日志：${summary}` : '';
     }
 
+    function hasGpcNoTrialFailure(pageState = {}) {
+      if (pageState.noTrial) {
+        return true;
+      }
+      const text = normalizeText([
+        pageState.lastLogLine,
+        pageState.logText,
+        pageState.bodyText,
+      ].filter(Boolean).join(' '));
+      return /(?:该|此|当前)?账[户号].{0,12}(?:没有|无|不具备).{0,8}试用资格|(?:没有|无|不具备).{0,8}试用资格/.test(text);
+    }
+
     async function ensureGpcCardMode(tabId) {
       if (!chrome?.scripting?.executeScript) {
         throw new Error('步骤 7：当前运行环境不支持脚本注入，无法切换 GPC 卡密充值模式。');
@@ -485,6 +497,7 @@
       while (Date.now() <= deadline) {
         throwIfStopped();
         const pageState = await inspectGpcPortalPage(tabId);
+        pageState.noTrial = hasGpcNoTrialFailure(pageState);
         const buttonText = normalizeText(pageState.startButtonText);
         await collectStatusLog(pageState, buttonText);
 
