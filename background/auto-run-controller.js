@@ -74,6 +74,31 @@
     });
     const DONE_NODE_STATUSES = new Set(['completed', 'manual_completed', 'skipped']);
 
+    function buildFreshAttemptIdentityResetPatch() {
+      return {
+        currentPhoneActivation: null,
+        phoneNumber: '',
+        accountIdentifierType: null,
+        accountIdentifier: '',
+        signupPhoneNumber: '',
+        signupPhoneActivation: null,
+        signupPhoneCompletedActivation: null,
+        signupPhoneVerificationRequestedAt: null,
+        signupPhoneVerificationPurpose: '',
+        currentPhoneVerificationCode: '',
+        currentPhoneVerificationCountdownEndsAt: 0,
+        currentPhoneVerificationCountdownWindowIndex: 0,
+        currentPhoneVerificationCountdownWindowTotal: 0,
+        email: null,
+        registrationEmailState: { ...EMPTY_REGISTRATION_EMAIL_STATE },
+        step8VerificationTargetEmail: '',
+        lastEmailTimestamp: null,
+        lastSignupCode: '',
+        lastLoginCode: '',
+        bindEmailSubmitted: false,
+      };
+    }
+
     function isPhoneSignupFlow(state = {}) {
       const resolvedSignupMethod = String(state?.resolvedSignupMethod || '').trim().toLowerCase();
       if (resolvedSignupMethod === 'phone' || resolvedSignupMethod === 'email') {
@@ -703,6 +728,7 @@
                 attemptRun,
                 sessionId,
               }),
+              ...buildFreshAttemptIdentityResetPatch(),
               currentNodeId: '',
               nodeStatuses: buildFreshAttemptNodeStatuses(prevState),
               autoRunRoundSummaries: serializeAutoRunRoundSummaries(totalRuns, roundSummaries),
