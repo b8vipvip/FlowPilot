@@ -11071,9 +11071,7 @@ const STEP_COMPLETION_SIGNAL_STEP_KEYS = new Set([
 const STEP_COMPLETION_SIGNAL_TIMEOUTS_BY_STEP_KEY = new Map([
   ['fill-profile', 150000],
 ]);
-const AUTO_RUN_PRE_EXECUTION_DELAYS_BY_STEP_KEY = new Map([
-  ['plus-checkout-create', 20000],
-]);
+const AUTO_RUN_PRE_EXECUTION_DELAYS_BY_STEP_KEY = new Map();
 
 function waitForNodeComplete(nodeId, timeoutMs = 120000) {
   throwIfStopped();
@@ -11914,7 +11912,7 @@ async function executeNodeAndWait(nodeId, delayAfter = 2000) {
   const preExecutionDelayMs = getAutoRunPreExecutionDelayMsForNode(normalizedNodeId, executionState);
   if (preExecutionDelayMs > 0) {
     await addLog(
-      `自动运行：节点 ${normalizedNodeId} 执行前固定等待 ${Math.round(preExecutionDelayMs / 1000)} 秒，确保 Plus Checkout 创建前页面稳定。`,
+      `自动运行：节点 ${normalizedNodeId} 执行前固定等待 ${Math.round(preExecutionDelayMs / 1000)} 秒。`,
       'info'
     );
     await sleepWithStop(preExecutionDelayMs);
