@@ -15,6 +15,7 @@
       phoneVerificationHelpers = null,
       resolveSignupMethod = () => 'email',
       resolveSignupEmailForFlow,
+      setState = async () => {},
       sendToContentScriptResilient,
       OPENAI_AUTH_INJECT_FILES,
       waitForTabStableComplete = null,
@@ -186,17 +187,33 @@
     }
 
     async function resolveSignupPhoneForStep2(state = {}) {
+      const isFailedPhoneNumber = (phoneNumber) => (
+        typeof phoneVerificationHelpers?.isFailedPhoneNumber === 'function'
+          ? phoneVerificationHelpers.isFailedPhoneNumber(state, phoneNumber)
+          : Boolean(String(phoneNumber || '').replace(/\D+/g, '') && state?.failedPhoneNumbers?.[String(phoneNumber || '').replace(/\D+/g, '')])
+      );
       const existingActivation = normalizeSignupPhoneActivationForStep2(state?.signupPhoneActivation);
       if (existingActivation?.phoneNumber) {
-        await addLog(`步骤 2：复用当前注册手机号 ${existingActivation.phoneNumber}，不重新获取号码。`);
-        return {
-          phoneNumber: existingActivation.phoneNumber,
-          activation: existingActivation,
-        };
+        if (isFailedPhoneNumber(existingActivation.phoneNumber)) {
+          if (typeof phoneVerificationHelpers?.cancelSignupPhoneActivation === 'function') {
+            await phoneVerificationHelpers.cancelSignupPhoneActivation(state, existingActivation).catch(() => {});
+          }
+          await setState({ signupPhoneActivation: null, signupPhoneNumber: '', accountIdentifier: '' });
+          await addLog(`步骤 2：当前保存手机号 ${existingActivation.phoneNumber} 已在本地失败列表中，已释放并禁止复用。`, 'warn');
+        } else {
+          await addLog(`步骤 2：复用当前注册手机号 ${existingActivation.phoneNumber}，不重新获取号码。`);
+          return {
+            phoneNumber: existingActivation.phoneNumber,
+            activation: existingActivation,
+          };
+        }
       }
 
       const manualPhoneNumber = getSignupPhoneNumberFromState(state);
       if (manualPhoneNumber) {
+        if (isFailedPhoneNumber(manualPhoneNumber)) {
+          throw new Error(`步骤 2：当前保存手机号 ${manualPhoneNumber} 已在本地失败列表中，请人工检查或稍后重试。`);
+        }
         await addLog(`步骤 2：使用手动填写的注册手机号 ${manualPhoneNumber}，本轮不会重新获取号码。`, 'warn');
         return {
           phoneNumber: manualPhoneNumber,
@@ -207,7 +224,26 @@
       if (typeof phoneVerificationHelpers?.prepareSignupPhoneActivation !== 'function') {
         throw new Error('手机号注册流程不可用：接码模块尚未初始化。');
       }
-      const activation = await phoneVerificationHelpers.prepareSignupPhoneActivation(state);
+      const maxPrice = Number(state?.heroSmsMaxPrice);
+      if (Number.isFinite(maxPrice) && maxPrice > 0 && state?.phoneSignupPriceFloorByCountryId) {
+        const exceededFloor = Object.values(state.phoneSignupPriceFloorByCountryId)
+          .map((value) => Number(value))
+          .find((value) => Number.isFinite(value) && value > maxPrice);
+        if (exceededFloor) {
+          await addLog(`价格下限 ${exceededFloor} 已超过用户最高价 ${maxPrice}，本轮失败。`, 'error');
+          throw new Error(`价格下限 ${exceededFloor} 已超过用户最高价 ${maxPrice}，本轮失败。`);
+        }
+      }
+      const activation = await phoneVerificationHelpers.prepareSignupPhoneActivation(state, {
+        countryPriceFloorByCountryId: state?.phoneSignupPriceFloorByCountryId || {},
+      });
+      if (activation?.phoneNumber && isFailedPhoneNumber(activation.phoneNumber)) {
+        if (typeof phoneVerificationHelpers?.cancelSignupPhoneActivation === 'function') {
+          await phoneVerificationHelpers.cancelSignupPhoneActivation(state, activation).catch(() => {});
+        }
+        await addLog(`接码平台返回了本地失败手机号 ${activation.phoneNumber}，已取消订单并停止当前轮。`, 'warn');
+        throw new Error(`步骤 2：接码平台返回了本地已标记失败的手机号 ${activation.phoneNumber}，已取消订单，请稍后重试或调整接码配置。`);
+      }
       return {
         phoneNumber: activation.phoneNumber,
         activation,

@@ -2758,40 +2758,61 @@ async function step3_fillEmailPassword(payload) {
   }
 
   const isLoginPasswordPage = passwordPageInfo.mode === 'login';
-  const signupVerificationRequestedAt = submitBtn && !isLoginPasswordPage ? Date.now() : null;
+  if (accountIdentifierType === 'phone' && isLoginPasswordPage) {
+    log('步骤 3：手机号注册进入登录密码页，不视为注册成功。', 'warn');
+    throw new Error('步骤 3：手机号注册进入登录密码页，不视为注册成功。');
+  }
+
+  if (!submitBtn) {
+    throw new Error('步骤 3：未找到可提交的密码页按钮。URL: ' + location.href);
+  }
+
+  await humanPause(500, 1300);
+  await performOperationWithDelay({ stepKey: 'fill-password', kind: 'submit', label: 'submit-signup-password' }, async () => {
+    simulateClick(submitBtn);
+  });
+  log('步骤 3：表单已提交，正在确认页面状态...');
+
+  const waitStartedAt = Date.now();
+  let nextSnapshot = inspectSignupEntryState();
+  while (Date.now() - waitStartedAt < 20000) {
+    await sleep(600);
+    nextSnapshot = inspectSignupEntryState();
+    const nextPageInfo = resolvePasswordPageInfo(nextSnapshot.url || location.href);
+    if (nextSnapshot.state !== 'password_page' && nextPageInfo.mode !== 'login' && nextPageInfo.mode !== 'signup') {
+      break;
+    }
+  }
+
+  const nextPasswordPageInfo = resolvePasswordPageInfo(nextSnapshot.url || location.href);
+  if (accountIdentifierType === 'phone' && nextPasswordPageInfo.mode === 'login') {
+    log('步骤 3：手机号注册进入登录密码页，不视为注册成功。', 'warn');
+    throw new Error('步骤 3：手机号注册进入登录密码页，不视为注册成功。');
+  }
+  if (nextSnapshot.state === 'password_page' || nextPasswordPageInfo.mode === 'signup') {
+    throw new Error('步骤 3：提交密码后仍停留在密码页，未确认进入下一阶段。URL: ' + (nextSnapshot.url || location.href));
+  }
+
+  const signupVerificationRequestedAt = (
+    nextSnapshot.state === 'phone_verification_page'
+    || nextSnapshot.state === 'verification_page'
+  ) ? Date.now() : null;
   const completionPayload = {
     email,
     phoneNumber: String(payload?.phoneNumber || '').trim(),
     accountIdentifierType,
     accountIdentifier,
+    state: nextSnapshot.state || '',
+    successState: nextSnapshot.state || '',
     signupVerificationRequestedAt,
-    deferredSubmit: Boolean(submitBtn),
+    deferredSubmit: false,
     passwordPageUrl: passwordPageInfo.url,
     passwordPagePath: passwordPageInfo.path,
     passwordPageMode: passwordPageInfo.mode,
-    ...(isLoginPasswordPage ? { passwordLoginFlow: true } : {}),
+    nextPageUrl: nextSnapshot.url || location.href,
   };
 
   reportComplete(3, completionPayload);
-
-  if (submitBtn) {
-    window.setTimeout(async () => {
-      try {
-        throwIfStopped();
-        await sleep(500);
-        await humanPause(500, 1300);
-        await performOperationWithDelay({ stepKey: 'fill-password', kind: 'submit', label: 'submit-signup-password' }, async () => {
-          simulateClick(submitBtn);
-        });
-        log('步骤 3：表单已提交');
-      } catch (error) {
-        if (!isStopError(error)) {
-          console.error('[MultiPage:openai-auth] deferred step 3 submit failed:', error?.message || error);
-        }
-      }
-    }, 120);
-  }
-
   return completionPayload;
 }
 

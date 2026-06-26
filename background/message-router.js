@@ -598,17 +598,15 @@
     }
 
     function shouldSkipPhoneSignupRegistrationTailAfterPassword(payload = {}, state = {}) {
-      if (!isPhoneSignupStepPayload(payload, state) || isSignupPasswordPagePayload(payload) || !isLoginPasswordPagePayload(payload)) {
+      if (!isPhoneSignupStepPayload(payload, state) || isSignupPasswordPagePayload(payload) || isLoginPasswordPagePayload(payload)) {
         return false;
       }
       const nextState = String(payload?.state || payload?.successState || '').trim().toLowerCase();
-      return Boolean(payload?.ready)
-        || Boolean(payload?.alreadyVerified)
-        || nextState === 'verification'
-        || nextState === 'verification_page'
-        || nextState === 'phone_verification_page'
-        || nextState === 'oauth_consent_page'
-        || nextState === 'logged_in_home';
+      if (nextState === 'verification' || nextState === 'verification_page' || nextState === 'phone_verification_page') {
+        return false;
+      }
+      // Do not treat payload.ready as proof that phone signup registration tail is complete.
+      return nextState === 'oauth_consent_page' || nextState === 'logged_in_home';
     }
 
     async function skipPhoneSignupRegistrationTailAfterPassword(currentStep, payload = {}) {
@@ -1238,6 +1236,12 @@
           await clearAutoRunTimerAlarm();
           await resetState();
           await addLog('流程已重置', 'info');
+          return { ok: true };
+        }
+
+        case 'CLEAR_FAILED_PHONE_NUMBERS': {
+          await setState({ failedPhoneNumbers: {} });
+          await addLog('已清空本地失败手机号列表。', 'info');
           return { ok: true };
         }
 
