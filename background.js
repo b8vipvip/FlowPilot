@@ -1530,6 +1530,10 @@ const DEFAULT_STATE = {
   heroSmsLastPriceUserLimit: '',
   heroSmsLastPriceAt: 0,
   pendingPhoneActivationConfirmation: null,
+  failedPhoneNumbers: {},
+  phoneSignupPriceFloorByCountryId: {},
+  phoneSignupSmsTimeoutRestartCount: 0,
+  phoneSignupSmsTimeoutRestartLimit: 3,
   autoRunning: false, // 当前是否处于自动运行中。
   autoRunPhase: 'idle', // 当前自动运行阶段。
   autoRunCurrentRun: 0, // 自动运行当前执行到第几轮。

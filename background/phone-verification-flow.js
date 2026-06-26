@@ -78,6 +78,7 @@
     const PHONE_RESEND_THROTTLED_ERROR_PREFIX = 'PHONE_RESEND_THROTTLED::';
     const PHONE_RESEND_BANNED_NUMBER_ERROR_PREFIX = 'PHONE_RESEND_BANNED_NUMBER::';
     const PHONE_RESEND_SERVER_ERROR_PREFIX = 'PHONE_RESEND_SERVER_ERROR::';
+    const PHONE_SIGNUP_LOGIN_SMS_TIMEOUT_RESTART_PREFIX = 'PHONE_SIGNUP_LOGIN_SMS_TIMEOUT_RESTART::';
     const PHONE_ROUTE_405_RECOVERY_FAILED_ERROR_PREFIX = 'PHONE_ROUTE_405_RECOVERY_FAILED::';
     const PHONE_MANUAL_FREE_REUSE_ERROR_PREFIX = 'PHONE_MANUAL_FREE_REUSE::';
     const PHONE_AUTO_FREE_REUSE_PREPARE_ERROR_PREFIX = 'PHONE_AUTO_FREE_REUSE_PREPARE::';
@@ -1167,6 +1168,87 @@
 
     function isPhoneCodeTimeoutError(error) {
       return String(error?.message || '').startsWith(PHONE_CODE_TIMEOUT_ERROR_PREFIX);
+    }
+
+
+
+    function normalizeFailedPhoneNumber(phoneNumber) {
+      return String(phoneNumber || '').replace(/\D+/g, '');
+    }
+
+    function getActivationPrice(activation = {}) {
+      const value = activation?.selectedPrice ?? activation?.price;
+      const numeric = Number(value);
+      return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+    }
+
+    async function markFailedPhoneNumber(state = {}, activation = null, reason = 'unknown') {
+      const normalizedActivation = normalizeActivation(activation || state?.signupPhoneActivation || state?.currentPhoneActivation);
+      const phoneNumber = normalizeFailedPhoneNumber(normalizedActivation?.phoneNumber || activation?.phoneNumber || state?.signupPhoneNumber || state?.phoneNumber);
+      if (!phoneNumber) {
+        return null;
+      }
+      const previous = state?.failedPhoneNumbers?.[phoneNumber] || {};
+      const price = getActivationPrice(activation) ?? getActivationPrice(normalizedActivation);
+      const entry = {
+        ...previous,
+        phoneNumber,
+        provider: normalizedActivation?.provider || activation?.provider || previous.provider || '',
+        countryId: normalizedActivation?.countryId ?? activation?.countryId ?? previous.countryId ?? null,
+        countryLabel: normalizedActivation?.countryLabel || activation?.countryLabel || previous.countryLabel || '',
+        activationId: normalizedActivation?.activationId || activation?.activationId || previous.activationId || '',
+        ...(price !== null ? { price } : {}),
+        reason: String(reason || 'unknown'),
+        failedAt: Date.now(),
+        count: Math.max(0, Number(previous.count) || 0) + 1,
+      };
+      await setPhoneRuntimeState({
+        failedPhoneNumbers: {
+          ...(state?.failedPhoneNumbers || {}),
+          [phoneNumber]: entry,
+        },
+      });
+      await addLog(`手机号 ${phoneNumber} 已加入本地失败列表，原因：${entry.reason}。`, 'warn');
+      return entry;
+    }
+
+    function isFailedPhoneNumber(state = {}, phoneNumber = '') {
+      const normalized = normalizeFailedPhoneNumber(phoneNumber);
+      return Boolean(normalized && state?.failedPhoneNumbers && state.failedPhoneNumbers[normalized]);
+    }
+
+
+
+    function inferFailedPhoneReason(errorLike) {
+      const message = String(errorLike?.message || errorLike || '').trim();
+      if (!message) return '';
+      if (message.startsWith(PHONE_CODE_TIMEOUT_ERROR_PREFIX) || /sms[_\s-]*timeout|等待手机验证码超时|PHONE_CODE_TIMEOUT/i.test(message)) return 'sms_timeout';
+      if (/phone_number_used|already\s+used|已使用|用过|use\s+a\s+different\s+phone/i.test(message)) return 'phone_number_used';
+      if (/code_rejected|invalid\s+code|incorrect\s+code|验证码.*(?:拒绝|错误|不正确)/i.test(message)) return 'code_rejected';
+      if (/resend_phone_banned|banned\s+number|PHONE_RESEND_BANNED/i.test(message)) return 'resend_phone_banned';
+      if (/phone_max_usage_exceeded|max\s+usage/i.test(message)) return 'phone_max_usage_exceeded';
+      if (/activation_not_found|order\s+not\s+found|activation.*not\s+found/i.test(message)) return 'activation_not_found';
+      if (/phone_delivery_refused|cannot\s+send\s+text|无法发送|不能发送/i.test(message)) return 'phone_delivery_refused';
+      return '';
+    }
+
+    function buildLoginSmsTimeoutRestartError(error, activation = null) {
+      const normalizedActivation = normalizeActivation(activation) || {};
+      const price = getActivationPrice(activation) ?? getActivationPrice(normalizedActivation);
+      const payload = {
+        provider: normalizedActivation.provider || activation?.provider || '',
+        activationId: normalizedActivation.activationId || activation?.activationId || '',
+        phoneNumber: normalizedActivation.phoneNumber || activation?.phoneNumber || '',
+        countryId: normalizedActivation.countryId ?? activation?.countryId ?? null,
+        countryLabel: normalizedActivation.countryLabel || activation?.countryLabel || '',
+        selectedPrice: price,
+        price,
+        message: sanitizePhoneCodeTimeoutError(error)?.message || '等待手机验证码超时。',
+      };
+      const restartError = new Error(`${PHONE_SIGNUP_LOGIN_SMS_TIMEOUT_RESTART_PREFIX}${JSON.stringify(payload)}`);
+      restartError.code = 'PHONE_SIGNUP_LOGIN_SMS_TIMEOUT_RESTART';
+      restartError.activation = payload;
+      return restartError;
     }
 
     function isStaleSignupPhoneEmailVerificationError(error) {
@@ -2593,8 +2675,26 @@
 
     async function prepareSignupPhoneActivation(state = {}, options = {}) {
       return withPhoneVerificationLogContext({ step: 2, stepKey: 'submit-signup-email' }, async () => {
+        const providerForFloor = normalizePhoneSmsProvider(state?.phoneSmsProvider || DEFAULT_PHONE_SMS_PROVIDER);
+        const rawFloorMap = options?.countryPriceFloorByCountryId || state?.phoneSignupPriceFloorByCountryId || {};
+        const countryPriceFloorByCountryId = {};
+        if (rawFloorMap && typeof rawFloorMap === 'object') {
+          Object.entries(rawFloorMap).forEach(([key, value]) => {
+            const textKey = String(key || '').trim();
+            const [maybeProvider, maybeCountryId] = textKey.includes(':') ? textKey.split(':') : ['', textKey];
+            if (maybeProvider && normalizePhoneSmsProvider(maybeProvider) !== providerForFloor) {
+              return;
+            }
+            const countryId = String(normalizeCountryId(maybeCountryId, 0));
+            const numeric = Number(value);
+            if (countryId !== '0' && Number.isFinite(numeric) && numeric > 0) {
+              countryPriceFloorByCountryId[countryId] = numeric;
+            }
+          });
+        }
         const activation = await acquirePhoneActivation(state, {
           ...options,
+          countryPriceFloorByCountryId,
           logLabel: options?.logLabel || '步骤 2',
         });
         const normalizedActivation = normalizeActivation(activation);
@@ -3388,6 +3488,7 @@
             if (submitResult.invalidCode) {
               const invalidErrorText = String(submitResult.errorText || submitResult.url || '未知错误').trim();
               if (attempt >= DEFAULT_PHONE_SUBMIT_ATTEMPTS) {
+                await markFailedPhoneNumber(state, activation, 'code_rejected').catch(() => {});
                 throw new Error(`步骤 4：手机验证码连续 ${DEFAULT_PHONE_SUBMIT_ATTEMPTS} 次被拒绝：${invalidErrorText}`);
               }
 
@@ -3433,6 +3534,10 @@
         } catch (error) {
           if (shouldCancelActivation && activation) {
             await cancelSignupPhoneActivation(state, activation).catch(() => {});
+          }
+          const failedReason = inferFailedPhoneReason(error);
+          if (failedReason) {
+            await markFailedPhoneNumber(state, activation, failedReason).catch(() => {});
           }
           await setPhoneRuntimeState({
             [PHONE_VERIFICATION_CODE_STATE_KEY]: '',
@@ -3632,6 +3737,7 @@
             if (submitResult.invalidCode) {
               const invalidErrorText = String(submitResult.errorText || submitResult.url || '未知错误').trim();
               if (attempt >= DEFAULT_PHONE_SUBMIT_ATTEMPTS) {
+                await markFailedPhoneNumber(state, activation, 'code_rejected').catch(() => {});
                 throw new Error(`步骤 ${visibleStep}：登录手机验证码连续 ${DEFAULT_PHONE_SUBMIT_ATTEMPTS} 次被拒绝：${invalidErrorText}`);
               }
 
@@ -3667,10 +3773,20 @@
             return submitResult || {};
           }
 
+          await markFailedPhoneNumber(state, activation, 'code_rejected').catch(() => {});
           throw new Error(`步骤 ${visibleStep}：登录手机验证码未能成功提交。`);
         } catch (error) {
           if (shouldCancelActivation && activation) {
             await cancelPhoneActivation(state, activation).catch(() => {});
+          }
+          const timeoutForPhoneSignupLogin = isPhoneCodeTimeoutError(error) && isPhoneSignupIdentityState(state);
+          if (timeoutForPhoneSignupLogin) {
+            await markFailedPhoneNumber(state, activation, 'sms_timeout').catch(() => {});
+          } else {
+            const failedReason = inferFailedPhoneReason(error);
+            if (failedReason) {
+              await markFailedPhoneNumber(state, activation, failedReason).catch(() => {});
+            }
           }
           await setPhoneRuntimeState({
             signupPhoneActivation: null,
@@ -3678,6 +3794,9 @@
             signupPhoneVerificationRequestedAt: null,
             signupPhoneVerificationPurpose: '',
           });
+          if (timeoutForPhoneSignupLogin) {
+            throw buildLoginSmsTimeoutRestartError(error, activation);
+          }
           throw sanitizePhoneCodeTimeoutError(error);
         }
       });
@@ -4556,6 +4675,9 @@
       reactivatePhoneActivation,
       requestPhoneActivation,
       waitForLoginPhoneCode,
+      normalizeFailedPhoneNumber,
+      markFailedPhoneNumber,
+      isFailedPhoneNumber,
       waitForSignupPhoneCode,
     };
   }

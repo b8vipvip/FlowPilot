@@ -73,6 +73,38 @@
       source: '',
       updatedAt: 0,
     });
+
+
+    const PHONE_SIGNUP_LOGIN_SMS_TIMEOUT_RESTART_PREFIX = 'PHONE_SIGNUP_LOGIN_SMS_TIMEOUT_RESTART::';
+
+    function parsePhoneSignupSmsTimeoutRestart(errorLike) {
+      const message = String(errorLike?.message || errorLike || '');
+      if (!message.startsWith(PHONE_SIGNUP_LOGIN_SMS_TIMEOUT_RESTART_PREFIX)) {
+        return null;
+      }
+      try {
+        return JSON.parse(message.slice(PHONE_SIGNUP_LOGIN_SMS_TIMEOUT_RESTART_PREFIX.length)) || {};
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function normalizeRestartPrice(value) {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+    }
+
+    function buildPhoneSignupPriceFloorKey(activation = {}) {
+      const provider = String(activation?.provider || '').trim() || 'hero-sms';
+      const countryId = String(activation?.countryId ?? '').trim();
+      return provider && countryId ? `${provider}:${countryId}` : '';
+    }
+
+    function formatRestartPrice(value) {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? numeric.toFixed(4).replace(/0+$/, '').replace(/\.$/, '') : String(value || '');
+    }
+
     const DONE_NODE_STATUSES = new Set(['completed', 'manual_completed', 'skipped']);
 
     function buildFreshAttemptIdentityResetPatch() {
@@ -686,9 +718,12 @@
         let reuseExistingProgress = resumingCurrentRound;
         const currentRoundState = await getState();
         const keepSameEmailUntilAddPhone = autoRunSkipFailures && shouldKeepCustomMailProviderPoolEmail(currentRoundState);
+        const phoneSignupRestartLimitForRound = isPhoneSignupFlow(currentRoundState)
+          ? Math.max(0, Math.floor(Number(currentRoundState.phoneSignupSmsTimeoutRestartLimit) || 3))
+          : 0;
         const maxAttemptsForRound = autoRunSkipFailures
-          ? (keepSameEmailUntilAddPhone ? Number.MAX_SAFE_INTEGER : AUTO_RUN_MAX_RETRIES_PER_ROUND + 1)
-          : Math.max(1, attemptRun);
+          ? (keepSameEmailUntilAddPhone ? Number.MAX_SAFE_INTEGER : AUTO_RUN_MAX_RETRIES_PER_ROUND + 1 + phoneSignupRestartLimitForRound)
+          : Math.max(1 + phoneSignupRestartLimitForRound, attemptRun);
 
         while (attemptRun <= maxAttemptsForRound) {
           runtime.set({
@@ -822,6 +857,39 @@
             }
 
             const reason = getErrorMessage(err);
+            const smsTimeoutRestartActivation = parsePhoneSignupSmsTimeoutRestart(err);
+            if (smsTimeoutRestartActivation && isPhoneSignupFlow(await getState())) {
+              const restartState = await getState();
+              const limit = Math.max(1, Math.floor(Number(restartState.phoneSignupSmsTimeoutRestartLimit) || 3));
+              const used = Math.max(0, Math.floor(Number(restartState.phoneSignupSmsTimeoutRestartCount) || 0));
+              const price = normalizeRestartPrice(smsTimeoutRestartActivation.selectedPrice ?? smsTimeoutRestartActivation.price);
+              const floor = price !== null ? Number((price + 0.01).toFixed(4)) : null;
+              const floorKey = buildPhoneSignupPriceFloorKey(smsTimeoutRestartActivation);
+              const heroMaxPrice = normalizeRestartPrice(restartState.heroSmsMaxPrice);
+              const nextPriceFloorByCountryId = { ...(restartState.phoneSignupPriceFloorByCountryId || {}) };
+              if (floorKey && floor !== null) {
+                nextPriceFloorByCountryId[floorKey] = Math.max(Number(nextPriceFloorByCountryId[floorKey]) || 0, floor);
+              }
+              if (floor !== null && heroMaxPrice !== null && floor > heroMaxPrice) {
+                await addLog(`价格下限 ${formatRestartPrice(floor)} 已超过用户最高价 ${formatRestartPrice(heroMaxPrice)}，本轮失败。`, 'error');
+              } else if (used < limit) {
+                const prevState = await getState();
+                await setState({
+                  ...buildFreshAttemptIdentityResetPatch(),
+                  phoneSignupPriceFloorByCountryId: nextPriceFloorByCountryId,
+                  phoneSignupSmsTimeoutRestartCount: used + 1,
+                  currentNodeId: '',
+                  nodeStatuses: buildFreshAttemptNodeStatuses(prevState),
+                });
+                await addLog(`当前号码验证码超时，已释放号码并重开当前轮；下一次同国家价格下限提升到 ${floor !== null ? formatRestartPrice(floor) : '自动'}。`, 'warn');
+                cancelPendingCommands('当前手机号验证码超时，准备重开当前轮。');
+                await broadcastStopToContentScripts();
+                forceFreshTabsNextRun = true;
+                reuseExistingProgress = false;
+                attemptRun += 1;
+                continue;
+              }
+            }
             roundSummary.failureReasons.push(reason);
             const blockedByPhoneSmsRateLimit = typeof isPhoneSmsPlatformRateLimitFailure === 'function'
               && isPhoneSmsPlatformRateLimitFailure(err);
